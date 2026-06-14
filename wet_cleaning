@@ -1,0 +1,188 @@
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+
+const byte SIGNAL_PIN = 2;
+const byte PUMP_PIN = 8;
+
+const bool PUMP_ACTIVE_LEVEL = HIGH;
+const byte LCD_ADDRESS = 0x27;
+const byte LCD_COLS = 16;
+const byte LCD_ROWS = 2;
+
+const unsigned long DEBOUNCE_MS = 50;
+const unsigned long LCD_UPDATE_MS = 250;
+
+// Параметры циклической работы насоса
+const unsigned long PUMP_ON_DURATION_MS = 2000;   // 2 секунды включен
+const unsigned long PUMP_OFF_DURATION_MS = 3000;  // 3 секунды выключен
+const unsigned long CYCLE_PERIOD_MS = PUMP_ON_DURATION_MS + PUMP_OFF_DURATION_MS; // 5 секунд
+
+LiquidCrystal_I2C lcd(LCD_ADDRESS, LCD_COLS, LCD_ROWS);
+
+bool _rawSignalState = LOW;
+bool _stableSignalState = LOW;
+unsigned long _lastSignalChangeMs = 0;
+
+bool _pumpOn = false;
+unsigned long _pumpStartedMs = 0;
+unsigned long _totalRunMs = 0;
+unsigned long _lastCycleStartMs = 0;  // Время начала текущего цикла
+bool _useCycleMode = true;             // Режим циклической работы
+
+unsigned long _lastLcdUpdateMs = 0;
+
+void printLine(byte row, const char* text)
+{
+  lcd.setCursor(0, row);
+
+  byte len = strlen(text);
+  for (byte i = 0; i < LCD_COLS; i++)
+  {
+    if (i < len)
+      lcd.print(text[i]);
+    else
+      lcd.print(' ');
+  }
+}
+
+void setPump(bool on)
+{
+  if (_pumpOn == on)
+    return;
+
+  if (on)
+  {
+    digitalWrite(PUMP_PIN, PUMP_ACTIVE_LEVEL);
+    _pumpStartedMs = millis();
+    _pumpOn = true;
+  }
+  else
+  {
+    digitalWrite(PUMP_PIN, !PUMP_ACTIVE_LEVEL);
+    _totalRunMs += millis() - _pumpStartedMs;
+    _pumpOn = false;
+  }
+}
+
+// Функция циклического управления насосом
+void updatePumpCyclic()
+{
+  unsigned long currentMs = millis();
+  unsigned long cyclePosition = (currentMs - _lastCycleStartMs) % CYCLE_PERIOD_MS;
+  
+  bool shouldBeOn = (cyclePosition < PUMP_ON_DURATION_MS);
+  setPump(shouldBeOn);
+}
+
+// Функция управления по внешнему сигналу
+void updatePumpBySignal()
+{
+  bool currentRaw = digitalRead(SIGNAL_PIN);
+
+  if (currentRaw != _rawSignalState)
+  {
+    _rawSignalState = currentRaw;
+    _lastSignalChangeMs = millis();
+  }
+
+  if ((millis() - _lastSignalChangeMs) >= DEBOUNCE_MS)
+  {
+    if (_stableSignalState != _rawSignalState)
+    {
+      _stableSignalState = _rawSignalState;
+      setPump(_stableSignalState == HIGH);
+    }
+  }
+}
+
+void formatRuntime(unsigned long ms, char* buffer)
+{
+  unsigned long totalSeconds = ms / 1000UL;
+  unsigned long hours = totalSeconds / 3600UL;
+  unsigned long minutes = (totalSeconds % 3600UL) / 60UL;
+  unsigned long seconds = totalSeconds % 60UL;
+
+  snprintf(buffer, 17, "%02lu:%02lu:%02lu", hours, minutes, seconds);
+}
+
+void updateDisplay()
+{
+  char line1[17];
+  char line2[17];
+  char timeText[17];
+  char cycleText[17];
+
+  // Режим работы
+  const char* mode = _useCycleMode ? "CYCLE" : "SIGNAL";
+  snprintf(line1, sizeof(line1), "Pump: %-3s %s", _pumpOn ? "ON" : "OFF", mode);
+
+  unsigned long currentRunMs = _totalRunMs;
+  if (_pumpOn)
+    currentRunMs += millis() - _pumpStartedMs;
+
+  formatRuntime(currentRunMs, timeText);
+  
+  // Показываем время до следующего переключения (в циклическом режиме)
+  if (_useCycleMode) {
+    unsigned long currentMs = millis();
+    unsigned long cyclePosition = (currentMs - _lastCycleStartMs) % CYCLE_PERIOD_MS;
+    unsigned long timeLeft;
+    
+    if (_pumpOn) {
+      timeLeft = PUMP_ON_DURATION_MS - cyclePosition;
+      snprintf(line2, sizeof(line2), "On %s %lus", timeText, timeLeft / 1000);
+    } else {
+      timeLeft = CYCLE_PERIOD_MS - cyclePosition;
+      snprintf(line2, sizeof(line2), "Off %s %lus", timeText, timeLeft / 1000);
+    }
+  } else {
+    snprintf(line2, sizeof(line2), "Run %s", timeText);
+  }
+
+  printLine(0, line1);
+  printLine(1, line2);
+}
+
+void setup()
+{
+  pinMode(SIGNAL_PIN, INPUT);
+  pinMode(PUMP_PIN, OUTPUT);
+
+  digitalWrite(PUMP_PIN, !PUMP_ACTIVE_LEVEL);
+
+  // Инициализация дисплея
+  lcd.init();
+  lcd.backlight();
+
+  // Инициализация циклического режима
+  _lastCycleStartMs = millis();
+  
+  // Выберите нужный режим:
+  // _useCycleMode = true;   // Циклический режим (5 секунд)
+  // _useCycleMode = false;  // Режим управления по сигналу
+  _useCycleMode = true;  // По умолчанию циклический режим
+
+  if (!_useCycleMode) {
+    _rawSignalState = digitalRead(SIGNAL_PIN);
+    _stableSignalState = _rawSignalState;
+    _lastSignalChangeMs = millis();
+    setPump(_stableSignalState == HIGH);
+  }
+  
+  updateDisplay();
+}
+
+void loop()
+{
+  if (_useCycleMode) {
+    updatePumpCyclic();  // Циклический режим
+  } else {
+    updatePumpBySignal();  // Режим управления по сигналу
+  }
+
+  if (millis() - _lastLcdUpdateMs >= LCD_UPDATE_MS)
+  {
+    _lastLcdUpdateMs = millis();
+    updateDisplay();
+  }
+}
